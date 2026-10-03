@@ -1,7 +1,11 @@
 package com.ticketbooking.system.exception;
 
 import com.ticketbooking.system.logging.RequestIds;
+import com.ticketbooking.system.observability.ObservabilityMetrics;
+import com.ticketbooking.system.observability.ReservationOutcome;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -20,13 +24,20 @@ record ApiError(Instant timestamp, String request_id, int status, String code, S
 
 @RestControllerAdvice
 public class ApiErrors {
+    private final ObservabilityMetrics metrics;
+
+    public ApiErrors(ObservabilityMetrics metrics) {
+        this.metrics = metrics;
+    }
+
     @ExceptionHandler(DomainException.class)
     ResponseEntity<ApiError> domain(DomainException exception) {
         return error(exception.status, exception.code, exception.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    ResponseEntity<ApiError> invalid(MethodArgumentNotValidException exception) {
+    ResponseEntity<ApiError> invalid(MethodArgumentNotValidException exception, HttpServletRequest request) {
+        recordInvalidReservation(request);
         String message = exception.getBindingResult().getFieldErrors().stream()
                 .findFirst()
                 .map(error -> error.getField() + " " + error.getDefaultMessage())
@@ -35,18 +46,27 @@ public class ApiErrors {
     }
 
     @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
-    ResponseEntity<ApiError> malformed(Exception exception) {
+    ResponseEntity<ApiError> malformed(Exception exception, HttpServletRequest request) {
+        recordInvalidReservation(request);
         return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Invalid request");
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
-    ResponseEntity<ApiError> illegalArgument(IllegalArgumentException exception) {
+    ResponseEntity<ApiError> illegalArgument(IllegalArgumentException exception, HttpServletRequest request) {
+        recordInvalidReservation(request);
         return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "Invalid request");
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ApiError> integrity(DataIntegrityViolationException exception) {
+        metrics.recordDatabaseError();
         return error(HttpStatus.CONFLICT, "INVALID_RESERVATION_STATE", "The request conflicts with existing data");
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    ResponseEntity<ApiError> dataAccess(DataAccessException exception) {
+        metrics.recordDatabaseError();
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, "DATABASE_ERROR", "Database error");
     }
 
     @ExceptionHandler(Exception.class)
@@ -73,5 +93,12 @@ public class ApiErrors {
         }
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
                 .replace("\n", "\\n").replace("\r", "\\r") + "\"";
+    }
+
+    private void recordInvalidReservation(HttpServletRequest request) {
+        if ("POST".equals(request.getMethod()) && request.getRequestURI().matches("/shows/[^/]+/reserve")) {
+            metrics.recordReservationAttempt();
+            metrics.recordReservationOutcome(ReservationOutcome.INVALID_REQUEST, java.time.Duration.ZERO);
+        }
     }
 }

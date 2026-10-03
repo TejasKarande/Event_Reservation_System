@@ -23,6 +23,9 @@ public final class Contracts {
             int available_seats, int held_seats, int confirmed_seats, List<SeatView> seats) {
     }
 
+    public record ReconciliationView(int total, int available, int held, int confirmed, boolean balanced) {
+    }
+
     public record ReservationView(UUID reservation_id, UUID show_id, String user_id, List<String> seats,
             long amount_paise, String status) {
     }

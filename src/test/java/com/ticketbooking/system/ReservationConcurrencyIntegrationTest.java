@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ticketbooking.system.dto.Contracts.CreateShow;
 import com.ticketbooking.system.dto.Contracts.ShowView;
 import com.ticketbooking.system.service.ReservationService;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,6 +44,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@AutoConfigureObservability
 @Testcontainers(disabledWithoutDocker = true)
 class ReservationConcurrencyIntegrationTest {
     private static final String JWT_SECRET = "integration-test-secret-must-be-at-least-thirty-two-bytes";
@@ -61,6 +64,7 @@ class ReservationConcurrencyIntegrationTest {
     @Autowired private ObjectMapper json;
     @Autowired private ReservationService reservations;
     @Autowired private JdbcTemplate jdbc;
+    @Autowired private MeterRegistry meterRegistry;
 
     @AfterEach
     void clearDatabase() {
@@ -168,6 +172,81 @@ class ReservationConcurrencyIntegrationTest {
         assertEquals(201, retry.getResponse().getStatus());
         assertEquals(body(first).path("reservation_id").asText(), body(retry).path("reservation_id").asText());
         assertEquals(1, jdbc.queryForObject("select count(*) from reservation", Integer.class));
+    }
+
+    @Test
+    void successfulReservationIncrementsConfirmationCounter() throws Exception {
+        UUID show = show(4, "A1");
+        double before = counter("reservations_confirmed_total");
+
+        MvcResult result = reserve(show, "user-a", List.of("A1"), "metrics-success");
+
+        assertEquals(201, result.getResponse().getStatus());
+        assertEquals(before + 1, counter("reservations_confirmed_total"));
+    }
+
+    @Test
+    void seatConflictIncrementsSeatTakenDeclineMetric() throws Exception {
+        UUID show = show(4, "A1");
+        reserve(show, "user-a", List.of("A1"), "winner");
+        double beforeSeatTaken = counter("reservations_declined_total", "reason", "seat_taken");
+        double before5xx = counter("http_5xx_total");
+
+        MvcResult result = reserve(show, "user-b", List.of("A1"), "loser");
+
+        assertEquals(409, result.getResponse().getStatus());
+        assertEquals("SEAT_TAKEN", errorCode(result));
+        assertEquals(beforeSeatTaken + 1, counter("reservations_declined_total", "reason", "seat_taken"));
+        assertEquals(before5xx, counter("http_5xx_total"));
+    }
+
+    @Test
+    void perUserLimitIncrementsCorrespondingDeclineMetric() throws Exception {
+        UUID show = show(1, "A1", "A2");
+        reserve(show, "user-a", List.of("A1"), "first");
+        double before = counter("reservations_declined_total", "reason", "per_user_limit");
+
+        MvcResult result = reserve(show, "user-a", List.of("A2"), "second");
+
+        assertEquals(409, result.getResponse().getStatus());
+        assertEquals("PER_USER_LIMIT_EXCEEDED", errorCode(result));
+        assertEquals(before + 1, counter("reservations_declined_total", "reason", "per_user_limit"));
+    }
+
+    @Test
+    void idempotentReplayIsObservableAndDoesNotCreateAnotherReservation() throws Exception {
+        UUID show = show(4, "A1", "A2");
+        MvcResult first = reserve(show, "user-a", List.of("A1"), "replay");
+        double beforeReplay = counter("reservations_declined_total", "reason", "idempotent_replay");
+        double beforeConfirmed = counter("reservations_confirmed_total");
+
+        MvcResult retry = reserve(show, "user-a", List.of("A1"), "replay");
+
+        assertEquals(201, retry.getResponse().getStatus());
+        assertEquals(body(first).path("reservation_id").asText(), body(retry).path("reservation_id").asText());
+        assertEquals(1, jdbc.queryForObject("select count(*) from reservation where show_id=?", Integer.class, show));
+        assertEquals(beforeReplay + 1, counter("reservations_declined_total", "reason", "idempotent_replay"));
+        assertEquals(beforeConfirmed, counter("reservations_confirmed_total"));
+    }
+
+    @Test
+    void availabilityGaugeAndReconciliationMatchDatabaseState() throws Exception {
+        UUID show = show(4, "A1", "A2", "A3");
+        reserve(show, "user-a", List.of("A1", "A2"), "gauge");
+        int databaseAvailable = jdbc.queryForObject("select count(*) from show_seat where status='AVAILABLE'", Integer.class);
+
+        MvcResult reconciliation = mvc.perform(get("/shows/{id}/reconciliation", show)).andExpect(status().isOk()).andReturn();
+
+        assertEquals(databaseAvailable, (int) meterRegistry.get("seats_available").gauge().value());
+        assertEquals(3, body(reconciliation).path("total").asInt());
+        assertEquals(1, body(reconciliation).path("available").asInt());
+        assertEquals(2, body(reconciliation).path("confirmed").asInt());
+        assertTrue(body(reconciliation).path("balanced").asBoolean());
+    }
+
+    @Test
+    void prometheusEndpointIsAvailableToScrapers() throws Exception {
+        mvc.perform(get("/actuator/prometheus")).andExpect(status().isOk());
     }
 
     @Test
@@ -371,12 +450,13 @@ class ReservationConcurrencyIntegrationTest {
 
     private String token(String subject, String role) {
         SecretKey key = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
-        return Jwts.builder().subject(subject).claim("roles", List.of(role)).signWith(key).compact();
+        return "Bearer " + Jwts.builder().subject(subject).claim("roles", List.of(role)).signWith(key).compact();
     }
 
     private String expiredToken(String subject, String role) {
         SecretKey key = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
-        return Jwts.builder().subject(subject).claim("roles", List.of(role)).expiration(new Date(0)).signWith(key).compact();
+        return "Bearer " + Jwts.builder().subject(subject).claim("roles", List.of(role)).expiration(new Date(0))
+                .signWith(key).compact();
     }
 
     private int countStatus(List<MvcResult> results, int expectedStatus) {
@@ -393,5 +473,14 @@ class ReservationConcurrencyIntegrationTest {
 
     private JsonNode body(MvcResult result) throws Exception {
         return json.readTree(result.getResponse().getContentAsString());
+    }
+
+    private double counter(String name, String... tags) {
+        var search = meterRegistry.find(name);
+        if (tags.length > 0) {
+            search.tags(tags);
+        }
+        var counter = search.counter();
+        return counter == null ? 0.0 : counter.count();
     }
 }

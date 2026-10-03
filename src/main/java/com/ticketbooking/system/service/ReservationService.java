@@ -9,6 +9,7 @@ import com.ticketbooking.system.entity.Reservation;
 import com.ticketbooking.system.entity.ReservationStatus;
 import com.ticketbooking.system.entity.Show;
 import com.ticketbooking.system.exception.DomainException;
+import com.ticketbooking.system.observability.ReservationOutcome;
 import com.ticketbooking.system.repository.ReservationRepository;
 import com.ticketbooking.system.repository.ShowRepository;
 import org.springframework.http.HttpStatus;
@@ -58,6 +59,11 @@ public class ReservationService {
     /** The atomic decision occurs only after the state and every seat row are locked. */
     @Transactional
     public ReservationView reserve(UUID showId, String userId, Reserve request) {
+        return reserveWithOutcome(showId, userId, request).view();
+    }
+
+    @Transactional
+    public ReservationResult reserveWithOutcome(UUID showId, String userId, Reserve request) {
         List<String> seats = SeatRequestCanonicalizer.normalize(request.seats());
         String idempotencyKey = request.idempotency_key().trim();
         Show show = shows.findById(showId).orElseThrow(() -> notFound("SHOW_NOT_FOUND", "Show not found"));
@@ -80,7 +86,7 @@ public class ReservationService {
             if (reservationId == null) {
                 throw conflict("IDEMPOTENCY_CONFLICT", "The idempotent request is still being processed");
             }
-            return view(reservationId);
+            return new ReservationResult(view(reservationId), ReservationOutcome.IDEMPOTENT_REPLAY);
         }
 
         for (Map<String, Object> seat : lockedSeats) {
@@ -99,7 +105,7 @@ public class ReservationService {
         if (claimedKey != 1) {
             Map<String, Object> raced = findIdempotency(showId, userId, idempotencyKey);
             if (raced != null && requestHash.equals(raced.get("request_hash")) && raced.get("reservation_id") != null) {
-                return view((UUID) raced.get("reservation_id"));
+                return new ReservationResult(view((UUID) raced.get("reservation_id")), ReservationOutcome.IDEMPOTENT_REPLAY);
             }
             throw conflict("IDEMPOTENCY_CONFLICT", "Idempotency key was used with another request");
         }
@@ -121,7 +127,7 @@ public class ReservationService {
         db.update("update user_show_state set booked_seat_count=?,updated_at=now() where show_id=? and user_id=?",
                 bookedSeatCount + seats.size(), showId, userId);
         db.update("update idempotency_key set reservation_id=? where id=?", reservationId, idempotencyId);
-        return view(reservationId);
+        return new ReservationResult(view(reservationId), ReservationOutcome.CONFIRMED);
     }
 
     @Transactional
@@ -235,5 +241,8 @@ public class ReservationService {
 
     private static DomainException conflict(String code, String message) {
         return new DomainException(code, HttpStatus.CONFLICT, message);
+    }
+
+    public record ReservationResult(ReservationView view, ReservationOutcome outcome) {
     }
 }

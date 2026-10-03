@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: event-reservation-service
+    runtime: docker
+    healthCheckPath: /health/ready
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: SPRING_PROFILES_ACTIVE
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: event-reservation-db
+          property: connectionString
+      - key: DATABASE_USERNAME
+        fromDatabase:
+          name: event-reservation-db
+          property: user
+      - key: DATABASE_PASSWORD
+        fromDatabase:
+          name: event-reservation-db
+          property: password
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_POOL_MAX_SIZE
+        value: 10
+
+databases:
+  - name: event-reservation-db
+    databaseName: ticketbooking
+    user: ticketbooking

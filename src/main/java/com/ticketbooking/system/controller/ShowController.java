@@ -1,6 +1,7 @@
 package com.ticketbooking.system.controller;
 
 import com.ticketbooking.system.dto.Contracts.*;
+import com.ticketbooking.system.service.ReconciliationService;
 import com.ticketbooking.system.service.ReservationService;
 import jakarta.validation.Valid;
 import org.springframework.http.*;
@@ -13,9 +14,11 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 @RequestMapping("/shows")
 public class ShowController {
     private final ReservationService service;
+    private final ReconciliationService reconciliation;
 
-    public ShowController(ReservationService s) {
+    public ShowController(ReservationService s, ReconciliationService reconciliation) {
         service = s;
+        this.reconciliation = reconciliation;
     }
 
     @PostMapping
@@ -29,5 +32,11 @@ public class ShowController {
     @Operation(summary = "Get show availability")
     public ShowView show(@PathVariable UUID id) {
         return service.show(id);
+    }
+
+    @GetMapping("/{id}/reconciliation")
+    @Operation(summary = "Reconcile show seat counts", description = "Returns database-derived total, available, held, and confirmed counts.")
+    public ReconciliationView reconciliation(@PathVariable UUID id) {
+        return reconciliation.reconcile(id);
     }
 }

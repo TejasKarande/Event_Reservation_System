@@ -1,5 +1,6 @@
 package com.ticketbooking.system.logging;
 
+import com.ticketbooking.system.observability.ObservabilityMetrics;
 import jakarta.servlet.*;
 import jakarta.servlet.http.*;
 import org.slf4j.MDC;
@@ -17,6 +18,11 @@ import java.util.UUID;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class RequestIdFilter extends OncePerRequestFilter {
     private static final Logger LOG = LoggerFactory.getLogger(RequestIdFilter.class);
+    private final ObservabilityMetrics metrics;
+
+    public RequestIdFilter(ObservabilityMetrics metrics) {
+        this.metrics = metrics;
+    }
 
     protected void doFilterInternal(HttpServletRequest q, HttpServletResponse p, FilterChain c)
             throws ServletException, IOException {
@@ -31,6 +37,7 @@ public class RequestIdFilter extends OncePerRequestFilter {
             c.doFilter(q, p);
         } finally {
             long durationMs = (System.nanoTime() - start) / 1_000_000;
+            metrics.recordHttp(q.getMethod(), route(q), p.getStatus());
             LOG.info("{}", event(Instant.now().toString(), id, q, p.getStatus(), durationMs));
             MDC.remove("request_id");
             RequestIds.clear();
@@ -54,5 +61,25 @@ public class RequestIdFilter extends OncePerRequestFilter {
         if (value == null) return "null";
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
                 .replace("\n", "\\n").replace("\r", "\\r") + "\"";
+    }
+
+    private static String route(HttpServletRequest request) {
+        String path = request.getRequestURI();
+        if (path.matches("/shows/[^/]+/reserve")) {
+            return "/shows/{id}/reserve";
+        }
+        if (path.matches("/shows/[^/]+/reconciliation")) {
+            return "/shows/{id}/reconciliation";
+        }
+        if (path.matches("/shows/[^/]+")) {
+            return "/shows/{id}";
+        }
+        if (path.matches("/reservations/[^/]+/cancel")) {
+            return "/reservations/{id}/cancel";
+        }
+        if (path.startsWith("/actuator/health")) {
+            return "/actuator/health";
+        }
+        return path;
     }
 }
