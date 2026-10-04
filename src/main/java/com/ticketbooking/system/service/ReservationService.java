@@ -56,6 +56,24 @@ public class ReservationService {
         return showView(show, seats);
     }
 
+    @Transactional(readOnly = true)
+    public List<Show> getShows() {
+        return  db.query(
+                "select id,name,price_paise,per_user_limit,created_at " +
+                        "from shows order by name",
+                (rs, row) -> {
+                    Show show = new Show(
+                            rs.getString("name"),
+                            rs.getLong("price_paise"),
+                            rs.getInt("per_user_limit")
+                    );
+                    show.id = UUID.fromString(rs.getString("id"));
+                    show.createdAt = rs.getTimestamp("created_at").toInstant();
+                    return show;
+                }
+        );
+    }
+
     /** The atomic decision occurs only after the state and every seat row are locked. */
     @Transactional
     public ReservationView reserve(UUID showId, String userId, Reserve request) {

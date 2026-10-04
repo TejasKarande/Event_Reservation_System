@@ -17,14 +17,18 @@ public class JwtTokenGenerator implements CommandLineRunner {
     @Override
     public void run(String... args) {
 
-        String userToken =
+        String userToken1 =
                 jwtService.generateToken("1001", List.of("USER"));
+
+        String userToken2 =
+                jwtService.generateToken("1002", List.of("USER"));
 
         String adminToken =
                 jwtService.generateToken("1", List.of("ADMIN"));
 
         System.out.println("USER TOKEN:");
-        System.out.println(userToken);
+        System.out.println(userToken1);
+        System.out.println("\n"+userToken2);
 
         System.out.println("\nADMIN TOKEN:");
         System.out.println(adminToken);

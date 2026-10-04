@@ -1,11 +1,13 @@
 package com.ticketbooking.system.controller;
 
 import com.ticketbooking.system.dto.Contracts.*;
+import com.ticketbooking.system.entity.Show;
 import com.ticketbooking.system.service.ReconciliationService;
 import com.ticketbooking.system.service.ReservationService;
 import jakarta.validation.Valid;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
+import java.util.List;
 import java.util.UUID;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -19,6 +21,11 @@ public class ShowController {
     public ShowController(ReservationService s, ReconciliationService reconciliation) {
         service = s;
         this.reconciliation = reconciliation;
+    }
+
+    @GetMapping("/")
+    public List<Show> getShows() {
+        return service.getShows();
     }
 
     @PostMapping
